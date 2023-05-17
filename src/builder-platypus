@@ -1,0 +1,243 @@
+#!/bin/bash
+
+myVersion="##VERSION##"
+
+## region ############################################## Plist Functions
+
+source "functions/plist.sh" #inline
+
+## endregion ########################################### End Plist Functions
+
+## region ############################################## Git Functions
+
+source "functions/git.sh" #inline
+
+## endregion ########################################### End Git Functions
+
+## region ############################################## Output Functions
+
+function output::usage() {
+  echo ""
+  echo "build-platypus v${myVersion}: Wrapper for platypus CLI to automate semantic version incrementing."
+  echo ""
+  echo "Build Usage:"
+  echo ""
+  echo "  builder-platypus [ --major --minor --patch --push ] [ --quiet ] <path_to_profile>"
+  echo "  builder-platypus [ --major --minor --patch --push ] [ --current-version <version> ] [ --quiet ] <path_to_profile>"
+  echo "  builder-platypus [ --major --minor --patch --push ] [ --git ] [ --quiet ] <path_to_profile>"
+  echo "  builder-platypus [ --push ] [ --new-version <version> ] [ --quiet ] <path_to_profile>"
+  echo ""
+  echo "Other Usage:"
+  echo ""
+  echo "  builder-platypus --version             Displays the version number"
+  echo "  builder-platypus --help                Displays this help"
+  echo ""
+}
+
+function output::version() {
+  echo "builder-platypus v${myVersion}"
+}
+
+source "functions/output.sh" #inline
+
+## endregion ########################################### End Output Functions
+
+## region ############################################## Functions
+
+# shellcheck disable=SC2317
+function self::installed() {
+  # Check for Prerequisite of Platypus & Platypus CLI
+  if [ ! -f "/usr/local/bin/platypus" ]; then
+    if [ ! -d "/Applications/Platypus.app/" ]; then
+      return 1
+    else
+      return 2
+    fi
+  fi
+
+  return 0
+}
+
+function self::build() {
+  local profile version output retval dir cwd
+
+  profile="$1"
+  version="$2"
+  output="$3"
+  dir=$(/usr/bin/dirname "$output")
+  cwd=$(pwd)
+
+  if $isQuiet; then
+    if [ ! -d "$dir" ]; then
+      mkdir -p "$dir" > /dev/null 2>&1 || return 1
+    fi
+
+    cd "$dir" > /dev/null 2>&1 || return 1
+    /usr/local/bin/platypus -D --load-profile "$profile" -V "$version" "$output" > /dev/null 2>&1
+    retval=$?
+  else
+    if [ ! -d "$dir" ]; then
+      echo "-----------------------------------"
+      mkdir -p "$dir" || return 1
+    fi
+
+    cd "$dir" || return 1
+
+    echo "-----------------------------------"
+    /usr/local/bin/platypus -D --load-profile "$profile" -V "$version" "$output"
+    retval=$?
+    echo "-----------------------------------"
+  fi
+
+  return $retval
+}
+
+function self::app::plist() {
+  local plist
+
+  plist="$1/Contents/Info.plist"
+
+  [ ! -f "$plist" ] && return 1
+  echo "$plist" && return 0
+}
+
+## region ############################################## Argument Handling
+
+# Defaults for Input Variables
+isMajor=false
+isMinor=false
+isPatch=false
+isGit=false
+isPush=false
+isQuiet=false
+currentVersion=""
+newVersion=""
+ppDestApp=""
+
+args=()
+while [ "$1" != "" ]; do
+  # Check flags
+  case "$1" in
+      --major )                   isMajor=true;                ;;
+      --minor )                   isMinor=true;                ;;
+      --patch )                   isPatch=true;                ;;
+      --git )                     isGit=true;                  ;;
+      --push )                    isPush=true;                 ;;
+      -q | --quiet )              isQuiet=true;                ;;
+      --current-version )         currentVersion="$2";         shift;;
+      --new-version )             newVersion="$2";             shift;;
+      --output )                  ppDestApp="$2";              shift;;
+      -h | --help )               output::usage;               exit;; # quit and show usage
+      --version )                 output::version;             exit;; # quit and show usage
+      * )                         args+=("$1")                 # if no match, add it to the positional args
+  esac
+  shift # move to next kv pair
+done
+
+ppProfile="${args[0]}"
+ppProfileDir=$(/usr/bin/dirname "$ppProfile")
+[ -z "$ppDestApp" ] && ppDestApp=$(plist::value "$ppProfile" "destination")
+
+if [ "${ppDestApp:0:1}" != "/" ]; then
+  ppDestApp="$ppProfileDir/$ppDestApp"
+fi
+
+if $isGit || $isPush; then
+  gitBin=$(git::path)
+  flag="--push"
+  $isGit && flag="--git"
+  if [ -z "$gitBin" ]; then
+
+    $isQuiet || output::errorln "The $flag flag was used, but the 'git' binary is not installed."
+    exit 1
+  fi
+
+  if ! git::isRepo; then
+    $isQuiet || output::errorln "The $flag flag was used, but '$ppProfileDir' is not inside a git repo."
+    exit 1
+  fi
+fi
+
+## endregion ########################################### End Argument Handling
+
+## region ############################################## Version Values
+
+if [ -z "$currentVersion" ] && $isGit; then
+  currentVersion=$(git::version)
+fi
+
+if [ -z "$currentVersion" ] && [ -f "$ppDestApp" ]; then
+  plist=$(self::app::plist "$ppDestApp")
+  currentVersion=$(plist::value "$plist" "CFBundleShortVersionString")
+fi
+
+if [ -z "$currentVersion" ]; then
+  currentVersion=$(plist::value "$ppProfile" "Version")
+fi
+
+if [ -z "$currentVersion" ]; then
+  currentVersion="1.0"
+fi
+
+# A specified version takes priority
+if [ -z "$newVersion" ]; then
+  # Incrementing Value
+  if $isMajor; then
+    semverFlags="--major"
+  elif $isMinor; then
+    semverFlags="--minor"
+  elif $isPatch; then
+    semverFlags="--patch"
+  fi
+
+  newVersion=$(semver "$semverFlags" "$currentVersion")
+fi
+
+## endregion ########################################### End Version Values
+
+## region ############################################## Build App
+
+# Verify Platypus is Installed
+if ! self::installed; then
+  retval=$?
+  if [ "$retval" -eq "1" ]; then
+    $isQuiet || output::errorln "ERROR: The Platypus app is not installed, but is required to build."
+  elif [ "$retval" -eq "2" ]; then
+    $isQuiet || output::errorln "You must install the Platypus CLI tool. Open Platypus, then click Platypus -> Settings -> Install"
+    $isQuiet || output::errorln "Once the tool is installed, run this build script again."
+  fi
+
+  exit $retval
+fi
+
+# Build With Platypus
+if self::build "$ppProfile" "$newVersion" "$ppDestApp"; then
+  if $isPush; then
+    if $isQuiet; then
+      $gitBin commit "$ppProfile" -m "Version Bump to v${newVersion} (Built with build-platypus)" > /dev/null 2>&1
+      $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-platypus)"> /dev/null 2>&1
+      $gitBin push --follow-tags > /dev/null 2>&1
+    else
+      $gitBin commit "$ppProfile" -m "Version Bump to v${newVersion} (Built with build-platypus)"
+      $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-platypus)"
+      $gitBin push --follow-tags
+      echo "-----------------------------------"
+    fi
+  fi
+
+  if $isQuiet; then
+    echo "$ppDestApp"
+  fi
+
+  exit 0
+else
+  exit 1
+fi
+
+## endregion ########################################### End Build App
+
+
+
+
+
+

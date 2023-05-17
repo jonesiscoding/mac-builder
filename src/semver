@@ -1,0 +1,188 @@
+#!/bin/bash
+
+myVersion="##VERSION##"
+
+## region ############################################## Functions
+
+function output::usage() {
+  echo ""
+  echo "SemVer v${myVersion}: Semantic version incrementer with automatic Git Tag & macOS bundle support."
+  echo ""
+  echo "Usage:"
+  echo ""
+  echo "  semver --version             Displays the version number"
+  echo "  semver --help                Displays this help"
+  echo "  semver [ --major --minor --patch ] [ --app <path> ]"
+  echo "  semver [ --major --minor --patch ] [ --app <path> --plistKey <key> ]"
+  echo "  semver [ --major --minor --patch ]  [ --git ]"
+  echo "  semver [ --major --minor --patch ] <source_version>"
+  echo ""
+  echo "When using the --app flag:"
+  echo "  The source version is taken from the Info.plist inside the application bundle."
+  echo "  The 'CFBundleShortVersionString' key is used, unless a different --plistKey is given."
+  echo "When using the --git flag, the source version is taken from the tags of the Git repo."
+  echo ""
+  echo "If no source version is specified and neither (--git / --app) flag is used, then 1.0 is used as the default."
+  echo ""
+}
+
+function output::version() {
+  echo "semver v${myVersion}"
+}
+
+## region ############################################## Argument Handling
+
+isMajor=false
+isMinor=false
+isPatch=false
+isGit=false
+isRepo=false
+appPath=""
+plistKey="CFBundleShortVersionString"
+args=()
+while [ "$1" != "" ]; do
+  # Check flags
+  case "$1" in
+      --major )                   isMajor=true;                ;;
+      --minor )                   isMinor=true;                ;;
+      --patch )                   isPatch=true;                ;;
+      --git )                     isGit=true;                  ;;
+      --app )                     appPath="$2";                shift;;
+      --plistKey )                plistKey="$2";               shift;;
+      -h | --help )               output::usage;               exit;; # quit and show usage
+      --version )                 output::version;             exit;; # quit and show usage
+      * )                         args+=("$1")                 # if no match, add it to the positional args
+  esac
+  shift # move to next kv pair
+done
+
+#
+# Verify prerequisites
+#
+
+if [ -n "$appPath" ]; then
+  # We need something to read a plist
+  defaultsBin=""
+  if [[ $OSTYPE == 'darwin'* ]]; then
+    defaultsBin="/usr/bin/defaults"
+    [ ! -f "$defaultsBin" ] && defaultsBin=""
+  fi
+
+  if [ -z "$defaultsBin" ]; then
+    pythonBin=$(which python3) || pythonBin="/usr/bin/python3"
+    if [ ! -f "$pythonBin" ]; then
+      echo "ERROR: This system is not running macOS, nor is python3 available in the path." >&2
+      echo "       The --app flag cannot be used without a method of reading the bundle's property list file."
+      exit 1
+    fi
+  fi
+fi
+
+gitBin=$(which git) || gitBin="/usr/bin/git"
+if [ -z "$gitBin" ]; then
+  # We only require git to be installed if the --git flag was specified.
+  if $isGit; then
+    echo "ERROR: Git is not installed or was not found in the path, and the --git flag was specified." >&2
+    exit 1
+  fi
+else
+  inRepo=$("$gitBin" rev-parse --is-inside-work-tree)
+  [ "$inRepo" == "true" ] && isRepo=true
+  if $isGit && ! $isRepo; then
+    echo "ERROR: The current directory is not inside a GIT repo, and the --git flag was specified." >&2
+    exit 1
+  fi
+fi
+
+## endregion ########################################### End Argument Handling
+
+## region ############################################## Read Last Version
+
+lMajor="1"
+lMinor="0"
+lPatch="0"
+
+old=""
+if [ -n "$appPath" ]; then
+  plist="$appPath/Contents/Info.plist"
+  if [ -f "$plist" ]; then
+    if [ -n "$defaultsBin" ]; then
+      old=$($defaultsBin read "$plist" "$plistKey" 2>/dev/null)
+    elif [ -n "$pythonBin" ]; then
+      old=$("$pythonBin" -c "import plistlib; print(plistlib.load(open('$plist', 'rb'))['$plistKey'])" 2>/dev/null)
+    fi
+  fi
+elif $isGit; then
+  old=$($gitBin describe --abbrev=0 2> /dev/null | sed 's/^v//')
+  if [ -z "$old" ]; then
+    old="$lMajor.$lMinor.$lPatch"
+  fi
+else
+  old="${args[0]}"
+fi
+
+if [ -n "$old" ]; then
+  tMajor=$(echo "$old" | cut -d '+' -f 1 | cut -d '-' -f 1 | cut -d '.' -f 1)
+  tMinor=$(echo "$old" | cut -d '+' -f 1 | cut -d '-' -f 1 | cut -d '.' -f 2)
+  tPatch=$(echo "$old" | cut -d '+' -f 1 | cut -d '-' -f 1 | cut -d '.' -f 3)
+  [ -n "$tMajor" ] && lMajor="$tMajor"
+  [ -n "$tMinor" ] && lMinor="$tMinor"
+  [ -n "$tPatch" ] && lPatch="$tPatch"
+fi
+
+# Diff
+if [ -n "$gitBin" ]; then
+  diff=$($gitBin diff-index HEAD --)
+fi
+
+## endregion ########################################### End Read Last Version
+
+## region ############################################## Calculate New Version
+
+# Increment Version
+if $isMajor; then
+  nMajor=$((lMajor+1))
+  nPatch="0"
+else
+  nMajor="$lMajor"
+fi
+
+if $isMinor; then
+  nMinor=$((lMinor+1))
+  nPatch="0"
+elif $isMajor; then
+  nMinor=0
+else
+  nMinor="$lMinor"
+fi
+
+if $isPatch; then
+  nPatch=$((lPatch+1))
+elif $isMajor || $isMinor; then
+  nPatch=0
+else
+  nPatch="$lPatch"
+fi
+
+VERSION=$nMajor
+if [ "$nMinor" -gt "0" ] || [ "$nMinor" -eq "0" ] || [ "$nPatch" -gt "0" ] || [ -n "$DIFF" ]; then
+  VERSION="$VERSION.$nMinor"
+fi
+
+if [ "$nPatch" -gt "0" ]; then
+  VERSION="$VERSION.$nPatch"
+fi
+
+if [ -n "$diff" ]; then
+  rev=$(git rev-parse --short HEAD)
+  VERSION="$VERSION-${rev}b"
+fi
+
+## endregion ########################################### End Calculate New Version
+
+## region ############################################## Output
+
+echo "$VERSION"
+exit 0
+
+## endregion ########################################### End Output

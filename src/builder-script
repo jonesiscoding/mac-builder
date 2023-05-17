@@ -1,0 +1,238 @@
+#!/bin/bash
+
+myVersion="##VERSION##"
+binSemver=$(which semver)
+
+## region ############################################## Git Functions
+
+source "functions/git.sh" #inline
+
+## endregion ########################################### End Git Functions
+
+## region ############################################## Output Functions
+
+function output::usage() {
+  echo ""
+  echo "build-script v${myVersion}: Wrapper for bash scripts to automate semantic version incrementing and inlining of sourced functions."
+  echo ""
+  echo "Build Usage:"
+  echo ""
+  echo "  builder-script [ --major --minor --patch --push ] [ --quiet ] <path_to_scripts>"
+  echo "  builder-script [ --major --minor --patch --push ] [ --current-version <version> ] [ --quiet ] <path_to_scripts>"
+  echo "  builder-script [ --major --minor --patch --push ] [ --git ] [ --quiet ] <path_to_scripts>"
+  echo "  builder-script [ --push ] [ --new-version <version> ] [ --quiet ] <path_to_scripts>"
+  echo ""
+  echo "Other Usage:"
+  echo ""
+  echo "  builder-script --version             Displays the version number"
+  echo "  builder-script --help                Displays this help"
+  echo ""
+}
+
+function output::version() {
+  echo "builder-script v${myVersion}"
+}
+
+source "functions/output.sh" #inline
+
+## region ############################################## Script Functions
+
+function script::build() {
+  local inFile outFile sheBang placeholder outVersion
+  local outFile
+  local sheBang
+
+  inFile="$1"
+  outFile="$2"
+  outVersion="${3-:1.0}"
+  placeholder="${4-:##VERSION##}"
+
+  sheBang=$(head -3 "$inFile" | grep '#!')
+  echo "$sheBang" > "$outFile"
+  script::inline "$inFile" >> "$outFile"
+  /usr/bin/sed -i '' -e "1 s/$placeholder/$outVersion/; t" -e "1,// s//$outVersion/" "$outFile"
+
+  chmod 755 "$outFile"
+}
+
+function script::inline() {
+  local inLine sourceFile inFile inDir inAlways always
+
+  inFile="$1"
+  inDir=$(dirname "$inFile")
+
+  # Always inline?  Useful for recursion
+  inAlways="$2"
+  always=false
+  [ "$inAlways" == "True" ] && always=true
+
+  while IFS= read -r inLine; do
+    if ! echo "$inLine" | grep -q "^#!/"; then
+      if [[ "$inLine" =~ (\.|source)\s+.+ ]]; then
+        if $always || echo "$inLine" | cut -d '#' -f2 | grep -q "inline"; then
+          sourceFile="$(echo "$inLine" | cut -d' ' -f2)"
+          sourceFile="${sourceFile%\"}"
+          sourceFile="${sourceFile#\"}"
+          if [ -f "$inDir/$sourceFile" ]; then
+            echo "# Sourced from $sourceFile"
+            script::inline "$inDir/$sourceFile" "True"
+          else
+            echo "${inLine}"
+          fi
+        fi
+      else
+        echo "${inLine}"
+      fi
+
+    fi
+  done < "$inFile"
+}
+
+## endregion ########################################### End Functions
+
+## region ############################################## Argument Handling
+
+# Defaults for Input Variables
+isMajor=false
+isMinor=false
+isPatch=false
+isGit=false
+isPush=false
+isQuiet=false
+currentVersion=""
+newVersion=""
+vPlaceholder="##VERSION##"
+
+args=()
+while [ "$1" != "" ]; do
+  # Check flags
+  case "$1" in
+      --major )                   isMajor=true;                ;;
+      --minor )                   isMinor=true;                ;;
+      --patch )                   isPatch=true;                ;;
+      --git )                     isGit=true;                  ;;
+      --push )                    isPush=true;                 ;;
+      -q | --quiet )              isQuiet=true;                ;;
+      --current-version )         currentVersion="$2";         shift;;
+      --new-version )             newVersion="$2";             shift;;
+      --placeholder )             vPlaceholder="$2"            shift;;
+      --output )                  outputDir="$2"               shift;;
+      -h | --help )               output::usage;               exit;; # quit and show usage
+      --version )                 output::version;             exit;; # quit and show usage
+      * )                         args+=("$1")                 # if no match, add it to the positional args
+  esac
+  shift # move to next kv pair
+done
+
+# Verify Git If Needed
+if $isGit || $isPush; then
+  gitBin=$(git::path)
+  flag="--push"
+  $isGit && flag="--git"
+  if [ -z "$gitBin" ]; then
+
+    $isQuiet || output::errorln "ERROR: The $flag flag was used, but the 'git' binary is not installed."
+    exit 1
+  fi
+
+  if ! git::isRepo; then
+    $isQuiet || output::errorln "ERROR: The $flag flag was used, but the current directory is not inside a git repo."
+    exit 1
+  fi
+fi
+
+# Default the Output Dir
+if [ -z "$outputDir" ]; then
+  cwd=$(pwd)
+  base=$(basename "$cwd")
+  if [ "$base" == "src" ]; then
+    outputDir="../dist"
+  else
+    outputDir="./dist"
+  fi
+fi
+
+if [ ! -d "$outputDir" ]; then
+  if ! mkdir -p "$outputDir"; then
+    $isQuiet || output::errorln "ERROR: Could not create output directory."
+    exit 1
+  fi
+
+  outputDir=$(realpath "$outputDir")
+fi
+
+## endregion ########################################### End Argument Handling
+
+## region ############################################## Version Handling
+
+if [ -z "$currentVersion" ] && $isGit; then
+  currentVersion=$(git::version)
+fi
+
+if [ -z "$currentVersion" ]; then
+  currentVersion="1.0"
+fi
+
+# A specified version takes priority
+if [ -z "$newVersion" ]; then
+  # Incrementing Value
+  if $isMajor; then
+    semverFlags="--major"
+  elif $isMinor; then
+    semverFlags="--minor"
+  elif $isPatch; then
+    semverFlags="--patch"
+  fi
+
+  newVersion=$($binSemver "$semverFlags" "$currentVersion")
+fi
+
+## endregion ########################################### End Version Handling
+
+## region ############################################## Script Compilation
+
+outputFiles=()
+for i in "${args[@]}"; do
+  buildScriptName=$(basename "$i")
+  $isQuiet || output::notify "Building $buildScriptName"
+  if [ -f "$i" ]; then
+    [ -f "$outputDir/$buildScriptName" ] && rm "$outputDir/$buildScriptName"
+    script::build "$i" "$outputDir/$buildScriptName" "$newVersion" "$vPlaceholder"
+    outputFiles+=("$outputDir/$buildScriptName")
+    $isQuiet || output::successbg "DONE"
+  else
+    $isQuiet || output::errorbg "ERROR"
+    exit 1
+  fi
+done
+
+## endregion ########################################### End Script Compilation
+
+## region ############################################## Handle Repo
+
+if $isPush; then
+  outputFilesStr=$(printf "\"%s\" " "${outputFiles[@]}")
+  if $isQuiet; then
+    $gitBin commit "$outputFilesStr" -m "Version Bump to v${newVersion} (Built with build-script)" > /dev/null 2>&1
+    $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-script)"> /dev/null 2>&1
+    $gitBin push --follow-tags > /dev/null 2>&1
+  else
+    output::notify "Committing Version Tag"
+    output::defaultbg "SEE BELOW"
+    echo "-----------------------------------"
+    $gitBin commit "$outputFilesStr" -m "Version Bump to v${newVersion} (Built with build-script)"
+    $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-script)"
+    $gitBin push --follow-tags
+    echo "-----------------------------------"
+  fi
+
+  if $isQuiet; then
+    for i in "${outputFiles[@]}"; do
+      echo "$i"
+    done
+  fi
+fi
+
+exit 0
+
+## endregion ########################################### End Handle Repo

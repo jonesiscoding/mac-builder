@@ -1,0 +1,260 @@
+#!/bin/bash
+
+myVersion="##VERSION##"
+
+## region ############################################## Plist Functions
+
+source "functions/plist.sh" #inline
+
+## endregion ########################################### End Plist Functions
+
+## region ############################################## Git Functions
+
+source "functions/git.sh" #inline
+
+## endregion ########################################### End Git Functions
+
+## region ############################################## Output Functions
+
+function output::usage() {
+  echo ""
+  echo "build-packages v${myVersion}: Wrapper for packagesbuild (from Packages.app) to automate semantic version incrementing."
+  echo ""
+  echo "Build Usage:"
+  echo ""
+  echo "  builder-packages [ --major --minor --patch --push ] <path_to_pkgproj>"
+  echo "  builder-packages [ --major --minor --patch --push ] [ --current <version> ] <path_to_pkgproj>"
+  echo "  builder-packages [ --major --minor --patch --push ] [ --git ] <path_to_pkgproj>"
+  echo "  builder-packages [ --push ] [ --new <version> ] <path_to_pkgproj>"
+  echo ""
+  echo "Other Usage:"
+  echo ""
+  echo "  builder-packages --version             Displays the version number"
+  echo "  builder-packages --help                Displays this help"
+  echo ""
+}
+
+function output::version() {
+  echo "builder-packages v${myVersion}"
+}
+
+source "functions/output.sh" #inline
+
+## endregion ########################################### End Output Functions
+
+## region ############################################## Packages Functions
+
+# shellcheck disable=SC2317
+function packages::installed() {
+  # Check for Prerequisite of Packages.app & packagesbuild
+  if [ ! -f "/usr/local/bin/packagesbuild" ]; then
+    if [ ! -d "/Applications/Packages.app/" ]; then
+      return 1
+    else
+      return 2
+    fi
+  fi
+}
+
+# shellcheck disable=SC2317
+function packages::buildPath() {
+  local pathValue pathType pathRef
+
+  pathValue=$(/usr/libexec/PlistBuddy -c "print :PROJECT:PROJECT_SETTINGS:BUILD_PATH:PATH" "$1" 2>/dev/null)
+  pathType=$(/usr/libexec/PlistBuddy -c "print :PROJECT:PROJECT_SETTINGS:BUILD_PATH:PATH_TYPE" "$1" 2>/dev/null)
+
+  if [ -n "$pathValue" ]; then
+    if [ "$pathType" -eq "1" ]; then
+      echo "$(/usr/bin/dirname "$1")/$pathValue"
+    elif [ "$pathType" -eq "3" ]; then
+      pathRef=$(/usr/libexec/PlistBuddy -c "print :PROJECT:PACKAGE_SETTINGS:REFERENCE_PATH" "$1" 2>/dev/null)
+      if [ -n "$pathRef" ]; then
+        echo "$pathRef/$pathValue"
+      else
+        echo "$(/usr/bin/dirname "$1")/$pathValue"
+      fi
+    else
+      echo "$pathValue"
+    fi
+  else
+    return 1
+  fi
+
+  return 0
+}
+
+# shellcheck disable=SC2317
+function packages::version() {
+  /usr/libexec/PlistBuddy -c "print :PROJECT:PACKAGE_SETTINGS:VERSION" "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2317
+function packages::build() {
+  local projectFile projectBase buildDir version retval
+
+  projectFile="$1"
+  projectBase=$(/usr/bin/basename "$projectFile" .pkgproj)
+  version="$2"
+  buildDir="$3"
+
+  if $isQuiet; then
+    if [ ! -d "$buildDir" ]; then
+      /bin/mkdir -p "$buildDir" >/dev/null 2>&1 || return 1
+    fi
+
+    /usr/local/bin/packagesbuild --project "$projectFile" --build-folder "$buildDir" --package-version "$version" >/dev/null 2>&1
+    retval=$?
+  else
+    if [ ! -d "$buildDir" ]; then
+      echo "-----------------------------------"
+      /bin/mkdir -p "$buildDir" || return 1
+    fi
+
+    cd "$buildDir" || return 1
+
+    echo "-----------------------------------"
+    /usr/local/bin/packagesbuild --project "$projectFile" --build-folder "$buildDir" --package-version "$version"
+    retval=$?
+    echo "-----------------------------------"
+  fi
+
+  if [ "$retval" -eq "0" ]; then
+    if [ -f "${buildDir}/${projectBase}.pkg" ]; then
+      if /bin/mv "${buildDir}/${projectBase}.pkg" "${buildDir}/${projectBase}-${version}.pkg" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+  fi
+
+  return 1
+}
+
+## endregion ########################################### End Packages Functions
+
+## region ############################################## Argument Handling
+
+# Defaults for Input Variables
+isMajor=false
+isMinor=false
+isPatch=false
+isGit=false
+isPush=false
+isQuiet=false
+currentVersion=""
+newVersion=""
+pkgDest=""
+
+args=()
+while [ "$1" != "" ]; do
+  # Check flags
+  case "$1" in
+      --major )                   isMajor=true;                ;;
+      --minor )                   isMinor=true;                ;;
+      --patch )                   isPatch=true;                ;;
+      --git )                     isGit=true;                  ;;
+      --push )                    isPush=true;                 ;;
+      -q | --quiet )              isQuiet=true;                ;;
+      --current-version )         currentVersion="$2";         shift;;
+      --new-version )             newVersion="$2";             shift;;
+      --output )                  pkgDest="$2";               shift;;
+      -h | --help )               output::usage;               exit;; # quit and show usage
+      --version )                 output::version;             exit;; # quit and show usage
+      * )                         args+=("$1")                 # if no match, add it to the positional args
+  esac
+  shift # move to next kv pair
+done
+
+pkgProj="${args[0]}"
+[ -z "$pkgProj" ] && output::usage && exit 1
+[ -z "$pkgDest" ] && pkgDest=$(packages::buildPath "$pkgProj")
+
+if $isGit || $isPush; then
+  gitBin=$(git::path)
+  flag="--push"
+  $isGit && flag="--git"
+  if [ -z "$gitBin" ]; then
+
+    $isQuiet || output::errorln "The $flag flag was used, but the 'git' binary is not installed."
+    exit 1
+  fi
+
+  if ! git::isRepo; then
+    $isQuiet || output::errorln "The $flag flag was used, but '$pkgProj' is not inside a git repo."
+    exit 1
+  fi
+fi
+
+## endregion ########################################### End Argument Handling
+
+## region ############################################## Version Values
+
+if [ -z "$currentVersion" ] && $isGit; then
+  currentVersion=$(git::version)
+fi
+
+if [ -z "$currentVersion" ] && [ -f "$pkgProj" ]; then
+  currentVersion=$(packages::version "$pkgProj")
+fi
+
+if [ -z "$currentVersion" ]; then
+  currentVersion="1.0"
+fi
+
+# A specified version takes priority
+if [ -z "$newVersion" ]; then
+  # Incrementing Value
+  if $isMajor; then
+    semverFlags="--major"
+  elif $isMinor; then
+    semverFlags="--minor"
+  elif $isPatch; then
+    semverFlags="--patch"
+  fi
+
+  newVersion=$(semver "$semverFlags" "$currentVersion")
+fi
+
+## endregion ########################################### End Version Values
+
+## region ############################################## Build App
+
+# Verify Packages is Installed
+if ! packages::installed; then
+  retval=$?
+  if [ "$retval" -eq "1" ]; then
+    $isQuiet || output::errorln "The Packages app is not installed, but is required to build."
+  elif [ "$retval" -eq "2" ]; then
+    $isQuiet || output::errorln "You must install the packagesbuild CLI tool."
+    $isQuiet || output::errorln "Once the tool is installed, run this build script again."
+  fi
+
+  exit "$retval"
+fi
+
+# Build Package
+if packages::build "$pkgProj" "$newVersion" "$pkgDest"; then
+  if $isPush; then
+    if $isQuiet; then
+      $gitBin commit "$pkgProj" -m "Version Bump to v${newVersion} (Built with build-packages)" > /dev/null 2>&1
+      $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-packages)"> /dev/null 2>&1
+      $gitBin push --follow-tags > /dev/null 2>&1
+    else
+      $gitBin commit "$pkgProj" -m "Version Bump to v${newVersion} (Built with build-packages)"
+      $gitBin tag -a "v${newVersion}" -m "v${newVersion} (Built with build-packages)"
+      $gitBin push --follow-tags
+      echo "-----------------------------------"
+    fi
+  fi
+
+  if $isQuiet; then
+    projectBase=$(/usr/bin/basename "$pkgProj" .pkgproj)
+
+    echo "$pkgDest/$projectBase-$newVersion.pkg"
+  fi
+
+  exit 0
+else
+  exit 1
+fi
+
+## endregion ########################################### End Build App
