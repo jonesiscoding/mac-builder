@@ -175,16 +175,21 @@ fi
 
 # A specified version takes priority
 if [ -z "$newVersion" ]; then
+  semverFlags=()
   # Incrementing Value
   if $isMajor; then
-    semverFlags="--major"
+    semverFlags+=("--major")
   elif $isMinor; then
-    semverFlags="--minor"
+    semverFlags+=("--minor")
   elif $isPatch; then
-    semverFlags="--patch"
+    semverFlags+=("--patch")
   fi
 
-  newVersion=$($binSemver "$semverFlags" "$currentVersion")
+  if [ -n "$currentVersion" ]; then
+    semverFlags+=("$currentVersion")
+  fi
+
+  newVersion=$($binSemver "${semverFlags[@]}")
 fi
 
 ## endregion ########################################### End Version Handling
