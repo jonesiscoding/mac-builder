@@ -209,7 +209,7 @@ for i in "${args[@]}"; do
     [ -f "$outputDir/$buildScriptName" ] && rm "$outputDir/$buildScriptName"
     script::build "$i" "$outputDir/$buildScriptName" "$newVersion" "$vPlaceholder"
     outputFiles+=("$outputDir/$buildScriptName")
-    $isQuiet || output::successbg "DONE"
+    $isQuiet || output::successbg "$newVersion"
   else
     $isQuiet || output::errorbg "ERROR"
     exit 1
