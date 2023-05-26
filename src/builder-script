@@ -56,7 +56,7 @@ function script::build() {
 }
 
 function script::inline() {
-  local inLine sourceFile inFile inDir inAlways always
+  local thisLine isOutput sourceFile inFile inDir inAlways always
 
   inFile="$1"
   inDir=$(dirname "$inFile")
@@ -66,24 +66,29 @@ function script::inline() {
   always=false
   [ "$inAlways" == "True" ] && always=true
 
-  while IFS= read -r inLine; do
-    if ! echo "$inLine" | grep -q "^#!/"; then
-      if [[ "$inLine" =~ (\.|source)\s+.+ ]]; then
-        if $always || echo "$inLine" | cut -d '#' -f2 | grep -q "inline"; then
-          sourceFile="$(echo "$inLine" | cut -d' ' -f2)"
+  while IFS= read -r thisLine; do
+    isOutput=true
+    if echo "$thisLine" | grep -q "^#!/"; then
+      # Skip a Shebang
+      isOutput=false
+    else
+      # Evaluate whether it's a source line, with an #inline comment
+      if [[ "$thisLine" =~ (\.|source)\s+.+ ]]; then
+        if $always || echo "$thisLine" | cut -d '#' -f2 | grep -q "inline"; then
+          sourceFile="$(echo "$thisLine" | cut -d' ' -f2)"
           sourceFile="${sourceFile%\"}"
           sourceFile="${sourceFile#\"}"
           if [ -f "$inDir/$sourceFile" ]; then
+            # Inline Sourced File, Skip Line Output
+            isOutput=false
             echo "# Sourced from $sourceFile"
             script::inline "$inDir/$sourceFile" "True"
-          else
-            echo "${inLine}"
           fi
         fi
-      else
-        echo "${inLine}"
       fi
 
+      # Output the line if applicable
+      $isOutput && echo "${thisLine}"
     fi
   done < "$inFile"
 }
